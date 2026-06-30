@@ -1,0 +1,3 @@
+Telethon>=1.30.0
+aiohttp
+aiofiles
