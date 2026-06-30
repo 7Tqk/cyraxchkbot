@@ -15,8 +15,8 @@ import io  # لإرسال الـ GIF بنجاح
 
 # --- الإعدادات الأساسية ---
 CHECKER_API_URL = 'http://62.72.20.10:8081/'
-API_ID = 39413478
-API_HASH = '83564c20e16add7e5388ec749a9efd4a'
+API_ID = 30067059
+API_HASH = 'c9ee8df29903caf150937299f97703e2'
 BOT_TOKEN = '8145446640:AAEiIDCzyoDlaf2NICb_TRz-x1SG8jffMc8'
 
 WORKERS = 70
