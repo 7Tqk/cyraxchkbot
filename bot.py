@@ -14,7 +14,7 @@ from datetime import datetime
 import io  
 
 # --- الإعدادات الأساسية ---
-CHECKER_API_URL = 'https://autosh.up.railway.app//shopii?cc={card}&site={site}&proxy={proxy}'
+CHECKER_API_URL = 'http://62.72.20.10:8081/'
 API_ID = 30067059
 API_HASH = 'c9ee8df29903caf150937299f97703e2'
 BOT_TOKEN = '8145446640:AAEiIDCzyoDlaf2NICb_TRz-x1SG8jffMc8'
