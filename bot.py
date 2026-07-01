@@ -19,7 +19,8 @@ API_ID = 30067059
 API_HASH = 'c9ee8df29903caf150937299f97703e2'
 BOT_TOKEN = '8145446640:AAEiIDCzyoDlaf2NICb_TRz-x1SG8jffMc8'
 
-WORKERS = 30
+# تم تخفيض عدد العمال لتخفيف الضغط على خادم الفحص ومنع الـ Timeout
+WORKERS = 15 
 DELAY = 0.5
 
 PREMIUM_FILE = 'premium.txt'
@@ -111,14 +112,15 @@ _DEAD_INDICATORS = (
 # الجلسة الموحدة ومنظم المرور (The New Engine)
 # =========================================================================
 _global_session = None
-api_semaphore = asyncio.Semaphore(15) 
+# تم تخفيض منظم المرور لتجنب إغراق السيرفر بالطلبات
+api_semaphore = asyncio.Semaphore(10) 
 
 async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
         connector = aiohttp.TCPConnector(
-            limit=200, 
-            limit_per_host=30, 
+            limit=50,          # تم التخفيض لتجنب إغراق السيرفر
+            limit_per_host=15, 
             ssl=False, 
             enable_cleanup_closed=True
         ) 
@@ -155,7 +157,7 @@ def is_dead_site_error(error_msg):
 async def get_bin_info(card_number):
     try:
         bin_number = card_number[:6]
-        timeout = aiohttp.ClientTimeout(total=10, connect=5)
+        timeout = aiohttp.ClientTimeout(total=15, connect=5)
         session = await get_session()
         async with session.get(f'https://bins.antipublic.cc/bins/{bin_number}', timeout=timeout) as res:
             if res.status != 200:
@@ -185,7 +187,8 @@ async def check_card(card, site, proxy):
 
         params = {'cc': card, 'url': site, 'proxy': proxy}
         
-        timeout = aiohttp.ClientTimeout(total=28, connect=8, sock_read=20)
+        # تمت زيادة وقت الـ Timeout للسماح للسيرفر بالرد براحته
+        timeout = aiohttp.ClientTimeout(total=45, connect=10, sock_read=30)
         
         session = await get_session() 
         
@@ -193,7 +196,12 @@ async def check_card(card, site, proxy):
             async with session.get(CHECKER_API_URL, params=params, timeout=timeout) as resp:
                 if resp.status in [502, 503, 504, 429]:
                      return {'status': 'Site Error', 'message': f'API Congested ({resp.status})', 'card': card, 'retry': True, 'proxy': proxy}
-                raw = await resp.json(content_type=None)
+                
+                # حماية ضد انهيار الـ JSON في حال كان الرد خطأ Cloudflare
+                try:
+                    raw = await resp.json(content_type=None)
+                except Exception:
+                    return {'status': 'Site Error', 'message': 'Invalid API Response', 'card': card, 'retry': True, 'proxy': proxy}
 
         response_msg = raw.get('Response', '')
         price = raw.get('Price', '-')
@@ -256,7 +264,7 @@ async def check_card_with_retry(card, sites, proxies, max_retries=5):
 
         if attempt < max_retries - 1:
             if 'congested' in msg_lower or 'timeout' in msg_lower:
-                await asyncio.sleep(random.uniform(2.0, 4.0)) 
+                await asyncio.sleep(random.uniform(3.0, 6.0)) 
             else:
                 await asyncio.sleep(DELAY) 
 
@@ -576,7 +584,8 @@ async def check_command(event):
                 queue.task_done()
             
             now = time.time()
-            if now - last_update_time[0] >= 1.5:
+            # تعديل وقت التحديث إلى 4.5 ثوانٍ لحل مشكلة توقف واجهة البوت وتجنب حظر تيليجرام (FloodWait)
+            if now - last_update_time[0] >= 4.5:
                 last_update_time[0] = now
                 if session_key in active_sessions:
                     try: await update_progress(user_id, status_msg.id, all_results, all_results['checked'])
